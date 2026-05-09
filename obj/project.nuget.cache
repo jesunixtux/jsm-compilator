@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "dgSpecHash": "Ar1YA4jT0II=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\jesus\\Desktop\\jumpfall-stuff\\jsm-compilator\\JumpfallJsmCompilator.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\jesus\\.nuget\\packages\\microsoft.net.illink.tasks\\9.0.14\\microsoft.net.illink.tasks.9.0.14.nupkg.sha512",
+    "C:\\Users\\jesus\\.nuget\\packages\\steamworks.net\\2024.8.0\\steamworks.net.2024.8.0.nupkg.sha512",
+    "C:\\Users\\jesus\\.nuget\\packages\\microsoft.netcore.app.runtime.win-x64\\9.0.14\\microsoft.netcore.app.runtime.win-x64.9.0.14.nupkg.sha512",
+    "C:\\Users\\jesus\\.nuget\\packages\\microsoft.windowsdesktop.app.runtime.win-x64\\9.0.14\\microsoft.windowsdesktop.app.runtime.win-x64.9.0.14.nupkg.sha512",
+    "C:\\Users\\jesus\\.nuget\\packages\\microsoft.aspnetcore.app.runtime.win-x64\\9.0.14\\microsoft.aspnetcore.app.runtime.win-x64.9.0.14.nupkg.sha512"
+  ],
+  "logs": []
+}
