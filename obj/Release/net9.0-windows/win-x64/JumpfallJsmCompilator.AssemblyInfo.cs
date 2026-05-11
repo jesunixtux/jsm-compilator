@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("JumpfallJsmCompilator")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a4a3b88324374bc5d81c1408b98cc95a5fc952c3")]
 [assembly: System.Reflection.AssemblyProductAttribute("JumpfallJsmCompilator")]
 [assembly: System.Reflection.AssemblyTitleAttribute("JumpfallJsmCompilator")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

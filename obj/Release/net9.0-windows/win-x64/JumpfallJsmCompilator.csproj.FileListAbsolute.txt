@@ -279,3 +279,4 @@ C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\obj\Release\net9.0-windows\
 C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\obj\Release\net9.0-windows\win-x64\JumpfallJsmCompilator.pdb
 C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\obj\Release\net9.0-windows\win-x64\JumpfallJsmCompilator.genruntimeconfig.cache
 C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\obj\Release\net9.0-windows\win-x64\ref\JumpfallJsmCompilator.dll
+C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\obj\Release\net9.0-windows\win-x64\JumpfallJsmCompilator.sourcelink.json

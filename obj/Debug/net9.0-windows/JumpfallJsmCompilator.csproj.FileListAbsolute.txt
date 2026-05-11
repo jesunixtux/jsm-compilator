@@ -22,3 +22,4 @@ C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\obj\Debug\net9.0-windows\Ju
 C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\obj\Debug\net9.0-windows\JumpfallJsmCompilator.genruntimeconfig.cache
 C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\obj\Debug\net9.0-windows\ref\JumpfallJsmCompilator.dll
 C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\bin\Debug\net9.0-windows\steam_api64.dll
+C:\Users\jesus\Desktop\jumpfall-stuff\jsm-compilator\obj\Debug\net9.0-windows\JumpfallJsmCompilator.sourcelink.json

@@ -15,6 +15,7 @@ public sealed class MainForm : Form
     private const string LocalTestWorkshopId = "local_test";
     private const string WorkshopAssetFolderName = "assetlocal";
     private const string BackgroundImagesFolderName = "backgroundimg";
+    private const string WorkshopPreviewFileName = "preview.png";
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static readonly HashSet<string> KnownPieceIds = new(StringComparer.Ordinal)
@@ -132,7 +133,7 @@ public sealed class MainForm : Form
 
     private void AddMapRows(TableLayoutPanel root)
     {
-        root.Controls.Add(new Label { Text = "Map (.jmap/.jfue):", AutoSize = true }, 0, 1);
+        root.Controls.Add(new Label { Text = "Compiled map (.jfue):", AutoSize = true }, 0, 1);
         txtMap.Dock = DockStyle.Fill;
         root.SetColumnSpan(txtMap, 4);
         root.Controls.Add(txtMap, 1, 1);
@@ -143,7 +144,7 @@ public sealed class MainForm : Form
 
         root.Controls.Add(new Label { Text = "Assets folder:", AutoSize = true }, 0, 2);
         txtAssets.Dock = DockStyle.Fill;
-        txtAssets.PlaceholderText = @"Auto: Documents\jumpfall\levels\assetslocal";
+        txtAssets.PlaceholderText = @"Auto: Documents\jumpfall\levels\assetlocal";
         root.SetColumnSpan(txtAssets, 4);
         root.Controls.Add(txtAssets, 1, 2);
 
@@ -245,9 +246,9 @@ public sealed class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "Jumpfall maps|*.jmap;*.jfue;*.json|All files|*.*",
+            Filter = "Jumpfall compiled maps|*.jfue|All files|*.*",
             CheckFileExists = true,
-            InitialDirectory = Directory.Exists(GetCreationsFolder()) ? GetCreationsFolder() : GetLevelsRoot()
+            InitialDirectory = Directory.Exists(GetCompilatorFolder()) ? GetCompilatorFolder() : GetLevelsRoot()
         };
 
         if (dialog.ShowDialog() != DialogResult.OK)
@@ -265,7 +266,7 @@ public sealed class MainForm : Form
     {
         using var dialog = new FolderBrowserDialog
         {
-            Description = "Select the assetlocal/assetslocal folder for this map.",
+            Description = "Select the assetlocal folder for this map. Legacy assetslocal folders are still supported.",
             InitialDirectory = Directory.Exists(GetLocalAssetsRoot()) ? GetLocalAssetsRoot() : GetLevelsRoot(),
             UseDescriptionForTitle = true
         };
@@ -278,7 +279,7 @@ public sealed class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "Images|*.png;*.jpg;*.jpeg|All files|*.*",
+            Filter = "PNG images|*.png|All files|*.*",
             CheckFileExists = true
         };
 
@@ -426,11 +427,14 @@ public sealed class MainForm : Form
     {
         string sourcePath = txtMap.Text.Trim();
         if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
-            throw new InvalidOperationException("Select a valid .jmap or .jfue file.");
+            throw new InvalidOperationException("Select a valid compiled .jfue file.");
+
+        if (!Path.GetExtension(sourcePath).Equals(".jfue", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Workshop packages must be built from .jfue only. Do not publish .jmap editable files.");
 
         string safeWorkshopId = SanitizeWorkshopId(workshopId);
         string mapName = SanitizeMapName(Path.GetFileNameWithoutExtension(sourcePath));
-        string jfuePath = CompileToJfue(sourcePath, mapName);
+        string jfuePath = sourcePath;
         JsonNode mapData = ReadJsonNode(jfuePath);
         List<string> warnings = ValidateLevelData(mapData);
         string assetRootFolder = ResolveAssetsFolder(sourcePath);
@@ -446,6 +450,8 @@ public sealed class MainForm : Form
         string targetMapPath = Path.Combine(workshopFolder, mapFileName);
         File.Copy(jfuePath, targetMapPath, true);
 
+        string? targetPreviewPath = CopyPreviewToWorkshopFolder(workshopFolder, warnings);
+
         List<CopiedAsset> copiedAssets = new();
         CopyAssetLocalFolder(assetRootFolder, workshopAssetFolder, copiedAssets, warnings);
         CopyReferencedAssets(mapData, backgroundAssetFolder, Path.GetDirectoryName(jfuePath) ?? string.Empty, assetRootFolder, copiedAssets, warnings);
@@ -457,17 +463,28 @@ public sealed class MainForm : Form
         using FileStream stream = new(jsmPath, FileMode.CreateNew, FileAccess.ReadWrite);
         using ZipArchive zip = new(stream, ZipArchiveMode.Create, false);
         zip.CreateEntryFromFile(targetMapPath, mapFileName, CompressionLevel.Optimal);
+
+        if (!string.IsNullOrWhiteSpace(targetPreviewPath) && File.Exists(targetPreviewPath))
+            zip.CreateEntryFromFile(targetPreviewPath, WorkshopPreviewFileName, CompressionLevel.Optimal);
+
         zip.CreateEntry(WorkshopAssetFolderName + "/");
         zip.CreateEntry(WorkshopAssetFolderName + "/" + BackgroundImagesFolderName + "/");
 
         foreach (CopiedAsset asset in copiedAssets.DistinctBy(asset => asset.ZipPath, StringComparer.OrdinalIgnoreCase))
             zip.CreateEntryFromFile(asset.FullPath, asset.ZipPath.Replace('\\', '/'), CompressionLevel.Optimal);
 
+        string mapTitle = SafeWorkshopText(txtTitle.Text, mapName);
+        string authorName = GetAuthorName();
         JsmManifest manifest = new()
         {
             MapFile = mapFileName,
             WorkshopId = safeWorkshopId,
-            CreatedUtc = DateTime.UtcNow.ToString("O")
+            CreatedUtc = DateTime.UtcNow.ToString("O"),
+            MapName = mapTitle,
+            Title = mapTitle,
+            Author = authorName,
+            AuthorName = authorName,
+            Preview = !string.IsNullOrWhiteSpace(targetPreviewPath) ? WorkshopPreviewFileName : string.Empty
         };
 
         ZipArchiveEntry manifestEntry = zip.CreateEntry("manifest.json", CompressionLevel.Optimal);
@@ -477,29 +494,33 @@ public sealed class MainForm : Form
         return new JsmBuildResult(jsmPath, targetMapPath, safeWorkshopId, warnings);
     }
 
-    private static string CompileToJfue(string sourcePath, string mapName)
+    private string? CopyPreviewToWorkshopFolder(string workshopFolder, List<string> warnings)
     {
-        string ext = Path.GetExtension(sourcePath);
-        if (ext.Equals(".jfue", StringComparison.OrdinalIgnoreCase))
-            return sourcePath;
+        string previewPath = txtPreview.Text.Trim();
+        string targetPreviewPath = Path.Combine(workshopFolder, WorkshopPreviewFileName);
 
-        if (!ext.Equals(".jmap", StringComparison.OrdinalIgnoreCase) && !ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Input must be .jmap, .jfue or .json.");
+        if (string.IsNullOrWhiteSpace(previewPath))
+        {
+            if (File.Exists(targetPreviewPath))
+                File.Delete(targetPreviewPath);
 
-        JsonNode node = ReadJsonNode(sourcePath);
-        JsonObject obj = node.AsObject();
-        obj["version"] = Math.Max(obj["version"]?.GetValue<int>() ?? 6, 6);
-        obj["gridSize"] ??= 1f;
-        obj["spawnPoint"] ??= new JsonObject { ["x"] = 0f, ["y"] = 0f };
-        obj["background"] ??= new JsonObject();
-        obj["backgrounds"] ??= new JsonArray();
-        obj["pieces"] ??= new JsonArray();
-        obj["triggers"] ??= new JsonArray();
+            warnings.Add("No preview PNG selected. The .jsm will not include preview.png.");
+            return null;
+        }
 
-        string jfuePath = Path.Combine(GetCompilatorFolder(), mapName + ".jfue");
-        Directory.CreateDirectory(Path.GetDirectoryName(jfuePath)!);
-        File.WriteAllText(jfuePath, node.ToJsonString(JsonOptions));
-        return jfuePath;
+        if (!File.Exists(previewPath))
+            throw new FileNotFoundException("Preview file does not exist.", previewPath);
+
+        if (!Path.GetExtension(previewPath).Equals(".png", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Preview must be a .png file. It will be stored as preview.png.");
+
+        string sourceFull = Path.GetFullPath(previewPath);
+        string targetFull = Path.GetFullPath(targetPreviewPath);
+
+        if (!string.Equals(sourceFull, targetFull, StringComparison.OrdinalIgnoreCase))
+            File.Copy(sourceFull, targetFull, true);
+
+        return targetPreviewPath;
     }
 
     private static JsonNode ReadJsonNode(string path)
@@ -561,7 +582,8 @@ public sealed class MainForm : Form
         {
             Path.Combine(mapFolder, WorkshopAssetFolderName),
             Path.Combine(mapFolder, "assetslocal"),
-            GetLocalAssetsRoot()
+            GetLocalAssetsRoot(),
+            GetLegacyLocalAssetsRoot()
         };
 
         string? existing = candidates.FirstOrDefault(Directory.Exists);
@@ -585,7 +607,8 @@ public sealed class MainForm : Form
         {
             Path.Combine(mapFolder, WorkshopAssetFolderName),
             Path.Combine(mapFolder, "assetslocal"),
-            GetLocalAssetsRoot()
+            GetLocalAssetsRoot(),
+            GetLegacyLocalAssetsRoot()
         };
 
         return candidates.FirstOrDefault(Directory.Exists) ?? string.Empty;
@@ -687,7 +710,8 @@ public sealed class MainForm : Form
         {
             Path.Combine(mapFolder, WorkshopAssetFolderName, BackgroundImagesFolderName, fileName),
             Path.Combine(mapFolder, "assetslocal", BackgroundImagesFolderName, fileName),
-            Path.Combine(GetLocalAssetsRoot(), BackgroundImagesFolderName, fileName)
+            Path.Combine(GetLocalAssetsRoot(), BackgroundImagesFolderName, fileName),
+            Path.Combine(GetLegacyLocalAssetsRoot(), BackgroundImagesFolderName, fileName)
         });
 
         return candidates.FirstOrDefault(File.Exists);
@@ -888,6 +912,25 @@ public sealed class MainForm : Form
         return string.IsNullOrWhiteSpace(clean) ? fallback : clean;
     }
 
+    private string GetAuthorName()
+    {
+        if (steamInitialized)
+        {
+            try
+            {
+                string steamName = SteamFriends.GetPersonaName();
+                if (!string.IsNullOrWhiteSpace(steamName))
+                    return steamName.Trim();
+            }
+            catch
+            {
+                // Keep packaging usable offline; the local OS user is a safe fallback for metadata.
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(Environment.UserName) ? "Unknown" : Environment.UserName;
+    }
+
     private static string SanitizeMapName(string name)
     {
         string safe = string.IsNullOrWhiteSpace(name) ? "map1" : name.Trim();
@@ -949,7 +992,8 @@ public sealed class MainForm : Form
     private static string GetCreationsFolder() => Path.Combine(GetLevelsRoot(), "creations");
     private static string GetCompilatorFolder() => Path.Combine(GetLevelsRoot(), "compilator");
     private static string GetWorkshopRoot() => Path.Combine(GetLevelsRoot(), "workshop");
-    private static string GetLocalAssetsRoot() => Path.Combine(GetLevelsRoot(), "assetslocal");
+    private static string GetLocalAssetsRoot() => Path.Combine(GetLevelsRoot(), "assetlocal");
+    private static string GetLegacyLocalAssetsRoot() => Path.Combine(GetLevelsRoot(), "assetslocal");
 
     private sealed record CopiedAsset(string FullPath, string ZipPath);
     private sealed record JsmBuildResult(string JsmPath, string JfuePath, string WorkshopId, List<string> Warnings);
@@ -960,6 +1004,11 @@ public sealed class MainForm : Form
         [JsonPropertyName("packageType")] public string PackageType { get; set; } = MainForm.PackageType;
         [JsonPropertyName("mapFile")] public string MapFile { get; set; } = string.Empty;
         [JsonPropertyName("workshopId")] public string WorkshopId { get; set; } = string.Empty;
+        [JsonPropertyName("mapName")] public string MapName { get; set; } = string.Empty;
+        [JsonPropertyName("title")] public string Title { get; set; } = string.Empty;
+        [JsonPropertyName("author")] public string Author { get; set; } = string.Empty;
+        [JsonPropertyName("authorName")] public string AuthorName { get; set; } = string.Empty;
+        [JsonPropertyName("preview")] public string Preview { get; set; } = string.Empty;
         [JsonPropertyName("createdUtc")] public string CreatedUtc { get; set; } = string.Empty;
     }
 
