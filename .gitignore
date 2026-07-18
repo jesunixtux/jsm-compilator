@@ -1,0 +1,14 @@
+# Visual Studio and .NET generated files
+.vs/
+[Bb]in/
+[Oo]bj/
+[Pp]ublish/
+
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Local logs and temporary packages
+*.log
+*.tmp

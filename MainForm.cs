@@ -12,10 +12,25 @@ public sealed class MainForm : Form
     private const uint AppId = 4053390;
     private const string PackageType = "jumpfall_map";
     private const int PackageFormatVersion = 1;
+    private const int CurrentLevelDataVersion = 19;
     private const string LocalTestWorkshopId = "local_test";
     private const string WorkshopAssetFolderName = "assetlocal";
     private const string BackgroundImagesFolderName = "backgroundimg";
+    private const string SoundFolderName = "sound";
+    private const string LuaFolderName = "lua";
     private const string WorkshopPreviewFileName = "preview.png";
+
+    private const long MaxPackageBytes = 256L * 1024L * 1024L;
+    private const long MaxExtractedBytes = 512L * 1024L * 1024L;
+    private const long MaxSingleEntryBytes = 128L * 1024L * 1024L;
+    private const long MaxImageFileBytes = 32L * 1024L * 1024L;
+    private const long MaxVideoFileBytes = 128L * 1024L * 1024L;
+    private const long MaxLuaScriptBytes = 512L * 1024L;
+    private const int MaxArchiveFiles = 1500;
+    private const int MaxTextureDimension = 4096;
+    private const long MaxTexturePixels = 4096L * 4096L;
+    private const int MaxBossesPerMap = 8;
+    private const int MaxBossNodesPerEncounter = 128;
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static readonly HashSet<string> KnownPieceIds = new(StringComparer.Ordinal)
@@ -23,7 +38,9 @@ public sealed class MainForm : Form
         "box_ground",
         "checkpoint",
         "apple",
-        "orb_jump"
+        "orb_jump",
+        "plane_jump",
+        "elevator"
     };
 
     private static readonly HashSet<string> KnownTriggerIds = new(StringComparer.Ordinal)
@@ -31,7 +48,40 @@ public sealed class MainForm : Form
         "limit_map",
         "deathzone",
         "changelevel",
-        "finish_level"
+        "finish_level",
+        "lua_event",
+        "static_camera",
+        "visibility",
+        "event",
+        "timer",
+        "wall_jump",
+        "triggered_ground"
+    };
+
+    private static readonly HashSet<string> SupportedBackgroundExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".png",
+        ".mp4",
+        ".webm"
+    };
+
+    private static readonly HashSet<string> SupportedSoundExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".wav",
+        ".ogg"
+    };
+
+    private static readonly HashSet<string> SupportedPackageAssetExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".json",
+        ".png",
+        ".mp4",
+        ".webm",
+        ".wav",
+        ".ogg",
+        ".lua",
+        ".txt",
+        ".md"
     };
 
     private readonly TextBox txtMap = new();
@@ -442,37 +492,32 @@ public sealed class MainForm : Form
         string workshopFolder = Path.Combine(GetWorkshopRoot(), safeWorkshopId);
         string workshopAssetFolder = Path.Combine(workshopFolder, WorkshopAssetFolderName);
         string backgroundAssetFolder = Path.Combine(workshopAssetFolder, BackgroundImagesFolderName);
+        string soundAssetFolder = Path.Combine(workshopAssetFolder, SoundFolderName);
+        string luaAssetFolder = Path.Combine(workshopAssetFolder, LuaFolderName);
         Directory.CreateDirectory(workshopFolder);
         Directory.CreateDirectory(workshopAssetFolder);
         Directory.CreateDirectory(backgroundAssetFolder);
+        Directory.CreateDirectory(soundAssetFolder);
+        Directory.CreateDirectory(luaAssetFolder);
 
         string mapFileName = Path.GetFileName(jfuePath);
         string targetMapPath = Path.Combine(workshopFolder, mapFileName);
-        File.Copy(jfuePath, targetMapPath, true);
+        CopyFileIfDifferent(jfuePath, targetMapPath);
 
         string? targetPreviewPath = CopyPreviewToWorkshopFolder(workshopFolder, warnings);
 
         List<CopiedAsset> copiedAssets = new();
         CopyAssetLocalFolder(assetRootFolder, workshopAssetFolder, copiedAssets, warnings);
         CopyReferencedAssets(mapData, backgroundAssetFolder, Path.GetDirectoryName(jfuePath) ?? string.Empty, assetRootFolder, copiedAssets, warnings);
+        CopyReferencedSoundtrackAssets(mapData, soundAssetFolder, Path.GetDirectoryName(jfuePath) ?? string.Empty, assetRootFolder, copiedAssets, warnings);
+        CopyReferencedLuaAssets(mapData, luaAssetFolder, Path.GetDirectoryName(jfuePath) ?? string.Empty, assetRootFolder, copiedAssets, warnings);
+
+        List<CopiedAsset> uniqueAssets = copiedAssets
+            .DistinctBy(asset => asset.ZipPath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        ValidatePackageContents(targetMapPath, targetPreviewPath, uniqueAssets);
 
         string jsmPath = Path.Combine(workshopFolder, Path.GetFileNameWithoutExtension(mapFileName) + ".jsm");
-        if (File.Exists(jsmPath))
-            File.Delete(jsmPath);
-
-        using FileStream stream = new(jsmPath, FileMode.CreateNew, FileAccess.ReadWrite);
-        using ZipArchive zip = new(stream, ZipArchiveMode.Create, false);
-        zip.CreateEntryFromFile(targetMapPath, mapFileName, CompressionLevel.Optimal);
-
-        if (!string.IsNullOrWhiteSpace(targetPreviewPath) && File.Exists(targetPreviewPath))
-            zip.CreateEntryFromFile(targetPreviewPath, WorkshopPreviewFileName, CompressionLevel.Optimal);
-
-        zip.CreateEntry(WorkshopAssetFolderName + "/");
-        zip.CreateEntry(WorkshopAssetFolderName + "/" + BackgroundImagesFolderName + "/");
-
-        foreach (CopiedAsset asset in copiedAssets.DistinctBy(asset => asset.ZipPath, StringComparer.OrdinalIgnoreCase))
-            zip.CreateEntryFromFile(asset.FullPath, asset.ZipPath.Replace('\\', '/'), CompressionLevel.Optimal);
-
         string mapTitle = SafeWorkshopText(txtTitle.Text, mapName);
         string authorName = GetAuthorName();
         JsmManifest manifest = new()
@@ -487,9 +532,45 @@ public sealed class MainForm : Form
             Preview = !string.IsNullOrWhiteSpace(targetPreviewPath) ? WorkshopPreviewFileName : string.Empty
         };
 
-        ZipArchiveEntry manifestEntry = zip.CreateEntry("manifest.json", CompressionLevel.Optimal);
-        using (StreamWriter writer = new(manifestEntry.Open()))
-            writer.Write(JsonSerializer.Serialize(manifest, JsonOptions));
+        string temporaryJsmPath = jsmPath + ".tmp";
+        if (File.Exists(temporaryJsmPath))
+            File.Delete(temporaryJsmPath);
+
+        try
+        {
+            using (FileStream stream = new(temporaryJsmPath, FileMode.CreateNew, FileAccess.ReadWrite))
+            using (ZipArchive zip = new(stream, ZipArchiveMode.Create, false))
+            {
+                zip.CreateEntryFromFile(targetMapPath, mapFileName, CompressionLevel.Optimal);
+
+                if (!string.IsNullOrWhiteSpace(targetPreviewPath) && File.Exists(targetPreviewPath))
+                    zip.CreateEntryFromFile(targetPreviewPath, WorkshopPreviewFileName, CompressionLevel.Optimal);
+
+                zip.CreateEntry(WorkshopAssetFolderName + "/");
+                zip.CreateEntry(WorkshopAssetFolderName + "/" + BackgroundImagesFolderName + "/");
+                zip.CreateEntry(WorkshopAssetFolderName + "/" + SoundFolderName + "/");
+                zip.CreateEntry(WorkshopAssetFolderName + "/" + LuaFolderName + "/");
+
+                foreach (CopiedAsset asset in uniqueAssets)
+                    zip.CreateEntryFromFile(asset.FullPath, asset.ZipPath.Replace('\\', '/'), CompressionLevel.Optimal);
+
+                ZipArchiveEntry manifestEntry = zip.CreateEntry("manifest.json", CompressionLevel.Optimal);
+                using StreamWriter writer = new(manifestEntry.Open());
+                writer.Write(JsonSerializer.Serialize(manifest, JsonOptions));
+            }
+
+            long packageBytes = new FileInfo(temporaryJsmPath).Length;
+            if (packageBytes > MaxPackageBytes)
+                throw new InvalidDataException($"The .jsm exceeds Jumpfall's {FormatMiB(MaxPackageBytes)} MiB package limit.");
+
+            File.Move(temporaryJsmPath, jsmPath, true);
+        }
+        catch
+        {
+            if (File.Exists(temporaryJsmPath))
+                File.Delete(temporaryJsmPath);
+            throw;
+        }
 
         return new JsmBuildResult(jsmPath, targetMapPath, safeWorkshopId, warnings);
     }
@@ -514,6 +595,9 @@ public sealed class MainForm : Form
         if (!Path.GetExtension(previewPath).Equals(".png", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Preview must be a .png file. It will be stored as preview.png.");
 
+        ValidateAssetFile(previewPath, "preview image");
+        ValidatePngDimensions(previewPath, "preview image");
+
         string sourceFull = Path.GetFullPath(previewPath);
         string targetFull = Path.GetFullPath(targetPreviewPath);
 
@@ -534,8 +618,36 @@ public sealed class MainForm : Form
         List<string> warnings = new();
         JsonObject obj = data.AsObject();
 
+        if (obj["version"] is JsonValue versionValue && versionValue.TryGetValue(out int version))
+        {
+            if (version > CurrentLevelDataVersion)
+                throw new InvalidDataException($"This map uses LevelData v{version}, but this compiler supports up to v{CurrentLevelDataVersion}.");
+
+            if (version < CurrentLevelDataVersion)
+                warnings.Add($"Map uses LevelData v{version}. Jumpfall will normalize it to v{CurrentLevelDataVersion} when loaded.");
+        }
+        else
+        {
+            warnings.Add("Map has no valid LevelData version. Jumpfall will treat it as a legacy map.");
+        }
+
         if (obj["spawnPoint"] is null)
             warnings.Add("Map has no spawnPoint.");
+
+        ValidateBackgroundNode(obj["background"], "background", warnings);
+        if (obj["backgrounds"] is JsonArray backgrounds)
+        {
+            for (int i = 0; i < backgrounds.Count; i++)
+                ValidateBackgroundNode(backgrounds[i], $"backgrounds[{i}]", warnings);
+        }
+
+        if (CollectBackgroundFiles(data).Any(IsVideoBackgroundFile))
+        {
+            warnings.Add("This map uses a video background. The current Linux build will reject it as 'Map not compatible'; Windows and macOS remain available.");
+        }
+
+        ValidateSoundtrack(obj["soundtrack"], warnings);
+        ValidateLua(obj["lua"], warnings);
 
         if (obj["pieces"] is JsonArray pieces)
         {
@@ -569,7 +681,100 @@ public sealed class MainForm : Form
             throw new InvalidDataException("triggers must be an array.");
         }
 
+        if (obj["bosses"] is JsonArray bosses)
+        {
+            if (bosses.Count > MaxBossesPerMap)
+                throw new InvalidDataException($"Map has {bosses.Count} bosses; Jumpfall allows at most {MaxBossesPerMap}.");
+
+            for (int i = 0; i < bosses.Count; i++)
+            {
+                if (bosses[i]?["nodes"] is JsonArray nodes && nodes.Count > MaxBossNodesPerEncounter)
+                    throw new InvalidDataException($"Boss {i} has {nodes.Count} nodes; Jumpfall allows at most {MaxBossNodesPerEncounter}.");
+            }
+        }
+
         return warnings;
+    }
+
+    private static void ValidateBackgroundNode(JsonNode? node, string label, List<string> warnings)
+    {
+        if (node is not JsonObject background || !(background["enabled"]?.GetValue<bool>() ?? false))
+            return;
+
+        string fileName = background["fileName"]?.GetValue<string>() ?? "background.png";
+        ValidateLocalFileName(fileName, label);
+
+        string extension = Path.GetExtension(fileName);
+        if (!SupportedBackgroundExtensions.Contains(extension))
+            throw new InvalidDataException($"{label} must reference a .png, .mp4, or .webm file.");
+
+        if (IsVideoBackgroundFile(fileName) && background["loopVideo"] is null)
+            warnings.Add(label + " has no loopVideo value. Jumpfall will apply its version-compatible default.");
+    }
+
+    private static void ValidateSoundtrack(JsonNode? node, List<string> warnings)
+    {
+        if (node is not JsonObject soundtrack || !(soundtrack["enabled"]?.GetValue<bool>() ?? false))
+            return;
+
+        if (soundtrack["tracks"] is not JsonArray tracks)
+        {
+            warnings.Add("Soundtrack is enabled but has no tracks array.");
+            return;
+        }
+
+        for (int i = 0; i < tracks.Count; i++)
+        {
+            if (tracks[i] is not JsonObject track)
+                continue;
+
+            string fileName = track["fileName"]?.GetValue<string>() ?? string.Empty;
+            ValidateLocalFileName(fileName, $"soundtrack track {i}");
+            if (!SupportedSoundExtensions.Contains(Path.GetExtension(fileName)))
+                throw new InvalidDataException($"Soundtrack track {i} must reference a .wav or .ogg file.");
+
+            if (track["volume"] is JsonValue volumeValue &&
+                volumeValue.TryGetValue(out double volume) &&
+                (volume < 0d || volume > 1d))
+            {
+                warnings.Add($"Soundtrack track {i} volume is outside 0..1 and will be clamped by Jumpfall.");
+            }
+        }
+    }
+
+    private static void ValidateLua(JsonNode? node, List<string> warnings)
+    {
+        if (node is not JsonObject lua || !(lua["enabled"]?.GetValue<bool>() ?? false))
+            return;
+
+        string entryFile = lua["entryFile"]?.GetValue<string>() ?? "main.lua";
+        ValidateLocalFileName(entryFile, "Lua entryFile");
+        if (!Path.GetExtension(entryFile).Equals(".lua", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Lua entryFile must reference a .lua file.");
+
+        if (lua["allowInWorkshop"] is JsonValue allowValue &&
+            allowValue.TryGetValue(out bool allowInWorkshop) &&
+            !allowInWorkshop)
+        {
+            warnings.Add("Lua is enabled but allowInWorkshop is false; Workshop runtime will not execute it.");
+        }
+    }
+
+    private static void ValidateLocalFileName(string fileName, string label)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+            throw new InvalidDataException(label + " has an empty file name.");
+
+        string trimmed = fileName.Trim();
+        if (Path.IsPathRooted(trimmed) || !string.Equals(trimmed, Path.GetFileName(trimmed), StringComparison.Ordinal))
+            throw new InvalidDataException(label + " must use a local file name without folders.");
+    }
+
+    private static bool IsVideoBackgroundFile(string fileName)
+    {
+        string extension = Path.GetExtension(fileName);
+        return extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ||
+               extension.Equals(".webm", StringComparison.OrdinalIgnoreCase);
     }
 
     private void AutoFillAssetsFolder(string mapPath)
@@ -618,7 +823,7 @@ public sealed class MainForm : Form
     {
         if (string.IsNullOrWhiteSpace(sourceAssetRoot))
         {
-            warnings.Add("No assetlocal/assetslocal folder selected or found. Empty assetlocal will be created.");
+            warnings.Add("No assetlocal folder was selected or found. An empty assetlocal structure will be created.");
             return;
         }
 
@@ -641,11 +846,21 @@ public sealed class MainForm : Form
                 continue;
             }
 
+            if (!IsSupportedAssetPath(relative, out string reason))
+            {
+                warnings.Add("Skipped asset: " + relative + " (" + reason + ")");
+                continue;
+            }
+
+            ValidateAssetFile(file, relative);
+            if (Path.GetExtension(file).Equals(".png", StringComparison.OrdinalIgnoreCase))
+                ValidatePngDimensions(file, relative);
+
             string destination = Path.Combine(targetAssetRoot, relative);
             if (!sameFolder)
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                File.Copy(file, destination, true);
+                CopyFileIfDifferent(file, destination);
             }
 
             copied.Add(new CopiedAsset(destination, Path.Combine(WorkshopAssetFolderName, relative)));
@@ -660,13 +875,17 @@ public sealed class MainForm : Form
             string? source = FindBackgroundSource(safeName, mapFolder, assetRootFolder);
             if (source is null)
             {
-                warnings.Add("Missing background PNG: " + safeName);
+                warnings.Add("Missing background asset: " + safeName);
                 continue;
             }
 
+            ValidateAssetFile(source, "background " + safeName);
+            if (Path.GetExtension(source).Equals(".png", StringComparison.OrdinalIgnoreCase))
+                ValidatePngDimensions(source, "background " + safeName);
+
             string destination = Path.Combine(targetAssetFolder, safeName);
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            File.Copy(source, destination, true);
+            CopyFileIfDifferent(source, destination);
             copied.Add(new CopiedAsset(destination, Path.Combine(WorkshopAssetFolderName, BackgroundImagesFolderName, safeName)));
         }
     }
@@ -701,20 +920,187 @@ public sealed class MainForm : Form
 
     private static string? FindBackgroundSource(string fileName, string mapFolder, string assetRootFolder)
     {
+        return FindReferencedAssetSource(BackgroundImagesFolderName, fileName, mapFolder, assetRootFolder);
+    }
+
+    private static void CopyReferencedSoundtrackAssets(JsonNode data, string targetAssetFolder, string mapFolder, string assetRootFolder, List<CopiedAsset> copied, List<string> warnings)
+    {
+        JsonObject obj = data.AsObject();
+        if (obj["soundtrack"] is not JsonObject soundtrack || !(soundtrack["enabled"]?.GetValue<bool>() ?? false) || soundtrack["tracks"] is not JsonArray tracks)
+            return;
+
+        HashSet<string> fileNames = new(StringComparer.OrdinalIgnoreCase);
+        foreach (JsonNode? node in tracks)
+        {
+            if (node is JsonObject track)
+            {
+                string fileName = track["fileName"]?.GetValue<string>() ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(fileName))
+                    fileNames.Add(Path.GetFileName(fileName.Trim()));
+            }
+        }
+
+        CopyReferencedFolderAssets(fileNames, SoundFolderName, "soundtrack", targetAssetFolder, mapFolder, assetRootFolder, copied, warnings);
+    }
+
+    private static void CopyReferencedLuaAssets(JsonNode data, string targetAssetFolder, string mapFolder, string assetRootFolder, List<CopiedAsset> copied, List<string> warnings)
+    {
+        JsonObject obj = data.AsObject();
+        if (obj["lua"] is not JsonObject lua || !(lua["enabled"]?.GetValue<bool>() ?? false))
+            return;
+
+        string entryFile = lua["entryFile"]?.GetValue<string>() ?? "main.lua";
+        CopyReferencedFolderAssets(
+            new[] { Path.GetFileName(entryFile.Trim()) },
+            LuaFolderName,
+            "Lua",
+            targetAssetFolder,
+            mapFolder,
+            assetRootFolder,
+            copied,
+            warnings);
+    }
+
+    private static void CopyReferencedFolderAssets(IEnumerable<string> fileNames, string folderName, string label, string targetAssetFolder, string mapFolder, string assetRootFolder, List<CopiedAsset> copied, List<string> warnings)
+    {
+        foreach (string fileName in fileNames.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            string? source = FindReferencedAssetSource(folderName, fileName, mapFolder, assetRootFolder);
+            if (source is null)
+            {
+                warnings.Add($"Missing {label} asset: {fileName}");
+                continue;
+            }
+
+            ValidateAssetFile(source, label + " " + fileName);
+            string destination = Path.Combine(targetAssetFolder, fileName);
+            CopyFileIfDifferent(source, destination);
+            copied.Add(new CopiedAsset(destination, Path.Combine(WorkshopAssetFolderName, folderName, fileName)));
+        }
+    }
+
+    private static string? FindReferencedAssetSource(string folderName, string fileName, string mapFolder, string assetRootFolder)
+    {
         List<string> candidates = new();
 
         if (!string.IsNullOrWhiteSpace(assetRootFolder))
-            candidates.Add(Path.Combine(assetRootFolder, BackgroundImagesFolderName, fileName));
+            candidates.Add(Path.Combine(assetRootFolder, folderName, fileName));
 
         candidates.AddRange(new[]
         {
-            Path.Combine(mapFolder, WorkshopAssetFolderName, BackgroundImagesFolderName, fileName),
-            Path.Combine(mapFolder, "assetslocal", BackgroundImagesFolderName, fileName),
-            Path.Combine(GetLocalAssetsRoot(), BackgroundImagesFolderName, fileName),
-            Path.Combine(GetLegacyLocalAssetsRoot(), BackgroundImagesFolderName, fileName)
+            Path.Combine(mapFolder, WorkshopAssetFolderName, folderName, fileName),
+            Path.Combine(mapFolder, "assetslocal", folderName, fileName),
+            Path.Combine(GetLocalAssetsRoot(), folderName, fileName),
+            Path.Combine(GetLegacyLocalAssetsRoot(), folderName, fileName)
         });
 
         return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private static bool IsSupportedAssetPath(string relativePath, out string reason)
+    {
+        string extension = Path.GetExtension(relativePath);
+        if (SupportedPackageAssetExtensions.Contains(extension))
+        {
+            reason = string.Empty;
+            return true;
+        }
+
+        reason = string.IsNullOrWhiteSpace(extension)
+            ? "files without an extension are not accepted by Jumpfall"
+            : "extension " + extension + " is not accepted by Jumpfall";
+        return false;
+    }
+
+    private static void ValidatePackageContents(string mapPath, string? previewPath, IReadOnlyCollection<CopiedAsset> assets)
+    {
+        ValidateAssetFile(mapPath, "compiled map");
+
+        int fileCount = 2 + assets.Count;
+        long extractedBytes = new FileInfo(mapPath).Length;
+
+        if (!string.IsNullOrWhiteSpace(previewPath) && File.Exists(previewPath))
+        {
+            ValidateAssetFile(previewPath, "preview image");
+            fileCount++;
+            extractedBytes += new FileInfo(previewPath).Length;
+        }
+
+        foreach (CopiedAsset asset in assets)
+        {
+            if (!File.Exists(asset.FullPath))
+                throw new FileNotFoundException("Asset disappeared before packaging.", asset.FullPath);
+
+            ValidateAssetFile(asset.FullPath, asset.ZipPath);
+            extractedBytes += new FileInfo(asset.FullPath).Length;
+        }
+
+        if (fileCount > MaxArchiveFiles)
+            throw new InvalidDataException($"The package contains {fileCount} files; Jumpfall allows at most {MaxArchiveFiles}.");
+
+        if (extractedBytes > MaxExtractedBytes)
+            throw new InvalidDataException($"The package expands to more than {FormatMiB(MaxExtractedBytes)} MiB.");
+    }
+
+    private static void ValidateAssetFile(string path, string label)
+    {
+        FileInfo info = new(path);
+        if (!info.Exists)
+            throw new FileNotFoundException(label + " does not exist.", path);
+
+        if (info.Length > MaxSingleEntryBytes)
+            throw new InvalidDataException($"{label} exceeds Jumpfall's {FormatMiB(MaxSingleEntryBytes)} MiB per-file limit.");
+
+        string extension = info.Extension;
+        if (extension.Equals(".png", StringComparison.OrdinalIgnoreCase) && info.Length > MaxImageFileBytes)
+            throw new InvalidDataException($"{label} exceeds Jumpfall's {FormatMiB(MaxImageFileBytes)} MiB image limit.");
+
+        if (IsVideoBackgroundFile(info.Name) && info.Length > MaxVideoFileBytes)
+            throw new InvalidDataException($"{label} exceeds Jumpfall's {FormatMiB(MaxVideoFileBytes)} MiB video limit.");
+
+        if (extension.Equals(".lua", StringComparison.OrdinalIgnoreCase) && info.Length > MaxLuaScriptBytes)
+            throw new InvalidDataException($"{label} exceeds Jumpfall's {FormatMiB(MaxLuaScriptBytes):0.0} MiB Lua limit.");
+    }
+
+    private static void ValidatePngDimensions(string path, string label)
+    {
+        try
+        {
+            using Image image = Image.FromFile(path);
+            if (image.RawFormat.Guid != System.Drawing.Imaging.ImageFormat.Png.Guid)
+                throw new InvalidDataException(label + " has a .png extension but is not a valid PNG image.");
+
+            long pixels = (long)image.Width * image.Height;
+            if (image.Width > MaxTextureDimension || image.Height > MaxTextureDimension || pixels > MaxTexturePixels)
+            {
+                throw new InvalidDataException(
+                    $"{label} is {image.Width}x{image.Height}; Jumpfall allows at most {MaxTextureDimension}x{MaxTextureDimension}.");
+            }
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidDataException(label + " could not be decoded as PNG: " + exception.Message, exception);
+        }
+    }
+
+    private static void CopyFileIfDifferent(string sourcePath, string destinationPath)
+    {
+        string sourceFull = Path.GetFullPath(sourcePath);
+        string destinationFull = Path.GetFullPath(destinationPath);
+        if (string.Equals(sourceFull, destinationFull, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(destinationFull)!);
+        File.Copy(sourceFull, destinationFull, true);
+    }
+
+    private static double FormatMiB(long bytes)
+    {
+        return bytes / (1024d * 1024d);
     }
 
     private void TryInitializeSteam()
@@ -952,9 +1338,16 @@ public sealed class MainForm : Form
         string safe = Path.GetFileName(string.IsNullOrWhiteSpace(fileName) ? "background.png" : fileName.Trim());
         foreach (char invalid in Path.GetInvalidFileNameChars())
             safe = safe.Replace(invalid, '_');
-        return Path.GetExtension(safe).Equals(".png", StringComparison.OrdinalIgnoreCase)
-            ? safe
-            : Path.GetFileNameWithoutExtension(safe) + ".png";
+
+        string extension = Path.GetExtension(safe);
+        if (!SupportedBackgroundExtensions.Contains(extension))
+            extension = ".png";
+
+        string name = Path.GetFileNameWithoutExtension(safe);
+        if (string.IsNullOrWhiteSpace(name))
+            name = "background";
+
+        return name + extension.ToLowerInvariant();
     }
 
     private static bool IsSafeRelativePath(string relativePath)
